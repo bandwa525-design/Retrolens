@@ -1,0 +1,333 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>RetroLens JS — Portal Filter</title>
+
+<!-- MediaPipe Hands -->
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+
+<style>
+  body {
+    margin: 0; padding: 0;
+    background: #000; color: #fff;
+    font-family: monospace; overflow: hidden;
+  }
+  .video-container {
+    position: absolute; width: 100vw; height: 100vh;
+    display: flex; justify-content: center; align-items: center;
+  }
+  video { display: none; }
+  canvas { position: absolute; width: 100%; height: 100%; object-fit: cover; transform: scaleX(-1); }
+  
+  #hud {
+    position: absolute; top: 20px; left: 20px; z-index: 10;
+    background: rgba(0,0,0,0.6); padding: 15px; border-radius: 8px;
+    border: 1px solid #00ffcc; pointer-events: none;
+  }
+  .stat { margin-bottom: 5px; font-size: 14px; }
+  .val { color: #00ffcc; font-weight: bold; }
+
+  #startOverlay {
+    position: absolute; inset: 0; background: rgba(0,0,0,0.9);
+    z-index: 100; display: flex; flex-direction: column;
+    justify-content: center; align-items: center; text-align: center;
+  }
+  .start-btn {
+    padding: 15px 30px; font-size: 1.2rem; background: #00ffcc; color: #000;
+    border: none; border-radius: 8px; font-weight: bold; cursor: pointer; margin-top: 20px;
+  }
+</style>
+</head>
+<body>
+
+<div id="startOverlay">
+  <h1 style="color:#00ffcc;">RetroLens JS</h1>
+  <p>Portal dua tangan. Cubit (pinch) untuk ganti filter.</p>
+  <button class="start-btn" id="startBtn">Mulai Kamera</button>
+</div>
+
+<div class="video-container">
+  <video id="inputVideo" autoplay playsinline></video>
+  <canvas id="mainCanvas"></canvas>
+</div>
+
+<div id="hud">
+  <div class="stat">Hands: <span class="val" id="ui-hands">0</span></div>
+  <div class="stat">Filter: <span class="val" id="ui-filter">thermal</span></div>
+  <div class="stat">Mode: <span class="val" id="ui-mode">2D Quad</span></div>
+</div>
+
+<script>
+const videoElement = document.getElementById('inputVideo');
+const canvas = document.getElementById('mainCanvas');
+const ctx = canvas.getContext('2d', { willReadFrequently: true });
+
+let width = window.innerWidth;
+let height = window.innerHeight;
+
+function resize() {
+  width = window.innerWidth;
+  height = window.innerHeight;
+  canvas.width = width;
+  canvas.height = height;
+}
+window.addEventListener('resize', resize);
+resize();
+
+// --- FILTERS (Port dari Python) ---
+const filters = {
+  thermal: (data, w, h) => {
+    for (let i = 0; i < data.length; i += 4) {
+      const r = data[i], g = data[i+1], b = data[i+2];
+      const v = 0.299 * r + 0.587 * g + 0.114 * b;
+      // Colormap JET (biru -> cyan -> ijo -> kuning -> merah)
+      let nr, ng, nb;
+      if (v < 64) { nr = 0; ng = 0; nb = v * 4; }
+      else if (v < 128) { nr = 0; ng = (v - 64) * 4; nb = 255; }
+      else if (v < 192) { nr = (v - 128) * 4; ng = 255; nb = 255 - (v - 128) * 4; }
+      else { nr = 255; ng = 255 - (v - 192) * 4; nb = 0; }
+      data[i] = nr; data[i+1] = ng; data[i+2] = nb;
+    }
+  },
+  invert: (data) => {
+    for (let i = 0; i < data.length; i += 4) {
+      data[i] = 255 - data[i];
+      data[i+1] = 255 - data[i+1];
+      data[i+2] = 255 - data[i+2];
+    }
+  },
+  glitch: (data, w, h) => {
+    for (let y = 0; y < h; y++) {
+      const shift = Math.floor(Math.random() * 20) - 10;
+      const rowOffset = y * w * 4;
+      if (Math.random() > 0.9) {
+        for (let x = 0; x < w; x++) {
+          const targetX = (x + shift + w) % w;
+          const i1 = rowOffset + x * 4;
+          const i2 = rowOffset + targetX * 4;
+          const tr = data[i1], tg = data[i1+1], tb = data[i1+2];
+          data[i1] = data[i2]; data[i1+1] = data[i2+1]; data[i1+2] = data[i2+2];
+          data[i2] = tr; data[i2+1] = tg; data[i2+2] = tb;
+        }
+      }
+    }
+  },
+  grayscale: (data) => {
+    for (let i = 0; i < data.length; i += 4) {
+      const v = 0.299 * data[i] + 0.587 * data[i+1] + 0.114 * data[i+2];
+      data[i] = v; data[i+1] = v; data[i+2] = v;
+    }
+  },
+  red_channel: (data) => {
+    for (let i = 0; i < data.length; i += 4) {
+      data[i+1] = 0; data[i+2] = 0;
+    }
+  }
+};
+const filterKeys = Object.keys(filters);
+let currentFilterIdx = 0;
+
+let is3DMode = false;
+let lastSwitchTime = 0;
+let lastModeToggle = 0;
+
+// --- MATH & GEOMETRY ---
+function dist(p1, p2) {
+  return Math.hypot(p1.x - p2.x, p1.y - p2.y);
+}
+function mapToCanvas(lm) {
+  return { x: (1 - lm.x) * width, y: lm.y * height };
+}
+function isFistClosed(lm) {
+  const wrist = mapToCanvas(lm[0]);
+  const tips = [8, 12, 16, 20];
+  let sumDist = 0;
+  tips.forEach(t => { sumDist += dist(mapToCanvas(lm[t]), wrist); });
+  return (sumDist / 4) < 80; // Threshold px
+}
+function isHandRotated(t, i) {
+  const dx = i.x - t.x, dy = i.y - t.y;
+  return (dy > 25) || (Math.abs(dx) > Math.abs(dy) * 1.1);
+}
+function sortQuadClean(pts) {
+  const xSorted = [...pts].sort((a, b) => a.x - b.x);
+  const left = xSorted.slice(0, 2).sort((a, b) => a.y - b.y);
+  const right = xSorted.slice(2, 4).sort((a, b) => a.y - b.y);
+  return [left[0], right[0], right[1], left[1]];
+}
+function sortQuadBowtie(pts) {
+  const xSorted = [...pts].sort((a, b) => a.x - b.x);
+  const left = xSorted.slice(0, 2).sort((a, b) => a.y - b.y);
+  const right = xSorted.slice(2, 4).sort((a, b) => a.y - b.y);
+  return [left[0], right[1], right[0], left[1]];
+}
+
+// --- PORTAL RENDERER ---
+function renderPortal(points, filterName, tempCanvas, tempCtx) {
+  let minX = width, maxX = 0, minY = height, maxY = 0;
+  points.forEach(p => {
+    if(p.x < minX) minX = p.x;
+    if(p.x > maxX) maxX = p.x;
+    if(p.y < minY) minY = p.y;
+    if(p.y > maxY) maxY = p.y;
+  });
+  
+  minX = Math.max(0, Math.floor(minX));
+  minY = Math.max(0, Math.floor(minY));
+  const w = Math.min(width - minX, Math.ceil(maxX - minX));
+  const h = Math.min(height - minY, Math.ceil(maxY - minY));
+
+  if (w <= 10 || h <= 10) return;
+
+  // 1. Ambil gambar dari koordinat bounding box
+  tempCanvas.width = w;
+  tempCanvas.height = h;
+  tempCtx.drawImage(canvas, minX, minY, w, h, 0, 0, w, h);
+
+  // 2. ImageData processing
+  const imgData = tempCtx.getImageData(0, 0, w, h);
+  filters[filterName](imgData.data, w, h);
+  tempCtx.putImageData(imgData, 0, 0);
+
+  // 3. Masking (Polygon)
+  ctx.save();
+  ctx.beginPath();
+  ctx.moveTo(points[0].x, points[0].y);
+  for (let i = 1; i < points.length; i++) {
+    ctx.lineTo(points[i].x, points[i].y);
+  }
+  ctx.closePath();
+  ctx.clip(); // Kunci area
+
+  // 4. Gambar hasil filter ke area clip
+  ctx.drawImage(tempCanvas, minX, minY);
+  
+  // 5. Garis tepi putih
+  ctx.beginPath();
+  ctx.moveTo(points[0].x, points[0].y);
+  for (let i = 1; i < points.length; i++) ctx.lineTo(points[i].x, points[i].y);
+  ctx.closePath();
+  ctx.strokeStyle = '#ffffff';
+  ctx.lineWidth = 2;
+  ctx.stroke();
+
+  ctx.restore();
+}
+
+// --- MEDIAPIPE SETUP ---
+const hands = new Hands({
+  locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
+});
+
+hands.setOptions({
+  maxNumHands: 2,
+  modelComplexity: 1,
+  minDetectionConfidence: 0.8,
+  minTrackingConfidence: 0.8
+});
+
+const tempCanvas = document.createElement('canvas');
+const tempCtx = tempCanvas.getContext('2d', { willReadFrequently: true });
+
+hands.onResults((results) => {
+  // Gambar kamera mirror ke canvas utama
+  ctx.save();
+  ctx.scale(-1, 1);
+  ctx.drawImage(results.image, -width, 0, width, height);
+  ctx.restore();
+
+  const now = performance.now();
+  const allHandTips = [];
+  let fistCount = 0;
+  let isBowtie = false;
+
+  if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+    document.getElementById('ui-hands').innerText = results.multiHandLandmarks.length;
+
+    results.multiHandLandmarks.forEach((hand) => {
+      const tips = [4, 8, 12, 16, 20].map(i => mapToCanvas(hand[i]));
+      allHandTips.push(tips);
+
+      // Fast Pinch (jempol 4 & telunjuk 8)
+      if (dist(tips[0], tips[1]) < 45) {
+        if (now - lastSwitchTime > 150) {
+          currentFilterIdx = (currentFilterIdx + 1) % filterKeys.length;
+          lastSwitchTime = now;
+          document.getElementById('ui-filter').innerText = filterKeys[currentFilterIdx];
+        }
+      }
+
+      // Fist (kepalan)
+      if (isFistClosed(hand)) {
+        fistCount++;
+      }
+    });
+
+    // Dual Fist Mode Switch
+    if (fistCount === 2 && (now - lastModeToggle > 1200)) {
+      is3DMode = !is3DMode;
+      lastModeToggle = now;
+      document.getElementById('ui-mode').innerText = is3DMode ? "3D Mesh" : "2D Quad";
+    }
+
+    const activeFilter = filterKeys[currentFilterIdx];
+
+    if (is3DMode) {
+      if (allHandTips.length === 2) {
+        const t1 = allHandTips[0], t2 = allHandTips[1];
+        renderPortal([t1[0], t1[1], t1[2], t2[2], t2[1], t2[0]], activeFilter, tempCanvas, tempCtx);
+        renderPortal([t1[2], t1[3], t1[4], t2[4], t2[3], t2[2]], filterKeys[(currentFilterIdx+1)%filterKeys.length], tempCanvas, tempCtx);
+      } else if (allHandTips.length === 1) {
+        renderPortal(allHandTips[0], activeFilter, tempCanvas, tempCtx);
+      }
+    } else {
+      if (allHandTips.length === 2) {
+        const corners = [allHandTips[0][0], allHandTips[0][1], allHandTips[1][0], allHandTips[1][1]];
+        let quad;
+        if (isHandRotated(corners[0], corners[1]) || isHandRotated(corners[2], corners[3])) {
+          quad = sortQuadBowtie(corners);
+          isBowtie = true;
+        } else {
+          quad = sortQuadClean(corners);
+        }
+        renderPortal(quad, activeFilter, tempCanvas, tempCtx);
+      } else if (allHandTips.length === 1) {
+        const t = allHandTips[0];
+        renderPortal([t[0], t[1], t[2], t[4]], activeFilter, tempCanvas, tempCtx);
+      }
+    }
+  } else {
+    document.getElementById('ui-hands').innerText = "0";
+  }
+
+  // HUD
+  ctx.fillStyle = "rgba(0, 255, 204, 0.8)";
+  ctx.font = "14px monospace";
+  ctx.fillText(`MODE: ${is3DMode ? '3D Mesh' : (isBowtie ? '2D Bowtie' : '2D Quad')}`, 15, height - 40);
+  ctx.fillText(`FILTER: ${filterKeys[currentFilterIdx].toUpperCase()}`, 15, height - 20);
+});
+
+// --- CAMERA INIT ---
+document.getElementById('startBtn').addEventListener('click', () => {
+  document.getElementById('startOverlay').style.display = 'none';
+  
+  const camera = new Camera(videoElement, {
+    onFrame: async () => {
+      await hands.send({ image: videoElement });
+    },
+    width: 960,
+    height: 540
+  });
+  
+  camera.start().catch(err => {
+    alert("Gagal buka kamera. Pastikan pakai HTTPS atau localhost.");
+  });
+});
+</script>
+</body>
+</html>
