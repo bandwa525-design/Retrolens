@@ -1,5 +1,5 @@
 """
-Retro Lens - Real-time Hand Gesture Filter Pipeline
+Retro Lens - WebRTC Streamlit Version
 """
 
 from dataclasses import dataclass
@@ -10,11 +10,12 @@ from typing import Dict, List, Tuple, Callable
 import cv2
 import mediapipe as mp
 import numpy as np
-
+import streamlit as st
+from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, RTCConfiguration
+import av
 
 @dataclass
 class PipelineConfig:
-    cam_index: int = 0
     frame_width: int = 960
     frame_height: int = 540
     pinch_threshold_px: float = 45.0
@@ -272,39 +273,30 @@ class PortalProcessor:
         cv2.putText(frame, f"FILTER: {self.current_filter_name.upper()} [Pinch / Key 'N'/'P']", (15, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2)
 
 
-def main() -> None:
-    cfg = PipelineConfig()
-    processor = PortalProcessor(cfg)
-    cap = cv2.VideoCapture(cfg.cam_index)
+# --- STREAMLIT WEBRTC WRAPPER ---
+class VideoProcessor(VideoProcessorBase):
+    def __init__(self):
+        self.processor = PortalProcessor(PipelineConfig())
 
-    if not cap.isOpened():
-        print("[ERROR] Kamera tidak terdeteksi!")
-        return
+    def recv(self, frame):
+        img = frame.to_ndarray(format="bgr24")
+        out_img = self.processor.process_frame(img)
+        return av.VideoFrame.from_ndarray(out_img, format="bgr24")
 
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            print("[ERROR] Gagal membaca frame kamera.")
-            break
+# --- STREAMLIT UI ---
+st.set_page_config(page_title="RetroLens", layout="wide")
+st.title("🖐️✨ RetroLens Portal")
+st.write("Buka portal dengan dua tangan. Cubit (pinch) jempol-telunjuk untuk ganti filter.")
 
-        out_frame = processor.process_frame(frame)
-        cv2.imshow("RetroLens Engine", out_frame)
+RTC_CONFIGURATION = RTCConfiguration(
+    {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
+)
 
-        key = cv2.waitKey(1) & 0xFF
-        if key == ord("q"):
-            break
-        elif key == ord("c"):
-            processor.is_3d_mode = not processor.is_3d_mode
-        elif key == ord("n"):
-            processor.cycle_filter(1)
-        elif key == ord("p"):
-            processor.cycle_filter(-1)
-        elif key == ord("s"):
-            cv2.imwrite(f"cap_{int(time.time())}.png", out_frame)
-
-    cap.release()
-    cv2.destroyAllWindows()
-
-
-if __name__ == "__main__":
-    main()
+webrtc_streamer(
+    key="retrolens",
+    mode=WebRtcMode.SENDRECV,
+    rtc_configuration=RTC_CONFIGURATION,
+    video_processor_factory=VideoProcessor,
+    media_stream_constraints={"video": True, "audio": False},
+    async_processing=True,
+        )
