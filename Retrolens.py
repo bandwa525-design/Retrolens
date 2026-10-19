@@ -1,5 +1,5 @@
 """
-Retro Lens - WebRTC Streamlit Version (Fixed + TURN)
+Retro Lens - WebRTC Streamlit Version (Fixed TURN)
 """
 
 from dataclasses import dataclass
@@ -288,15 +288,12 @@ st.set_page_config(page_title="RetroLens", layout="wide")
 st.title("🖐️✨ RetroLens Portal")
 st.write("Buka portal dengan dua tangan. Cubit (pinch) jempol-telunjuk untuk ganti filter.")
 
+# TURN server pake port 443 + TCP biar tembus firewall browser HP
 RTC_CONFIGURATION = RTCConfiguration(
     {"iceServers": [
         {"urls": ["stun:stun.l.google.com:19302"]},
         {
-            "urls": [
-                "turn:global.relay.metered.ca:80",
-                "turn:global.relay.metered.ca:443",
-                "turn:global.relay.metered.ca:443?transport=tcp"
-            ],
+            "urls": "turns:global.relay.metered.ca:443?transport=tcp",
             "username": "e15e83ba891c8173568dcf4d",
             "credential": "BdU4K3yKupZslCCX"
         }
@@ -310,4 +307,4 @@ webrtc_streamer(
     video_processor_factory=VideoProcessor,
     media_stream_constraints={"video": True, "audio": False},
     async_processing=True,
-    )
+        )
