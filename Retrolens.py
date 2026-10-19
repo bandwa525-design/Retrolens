@@ -1,5 +1,5 @@
 """
-Retro Lens - WebRTC Streamlit Version
+Retro Lens - WebRTC Streamlit Version (Fixed)
 """
 
 from dataclasses import dataclass
@@ -288,8 +288,16 @@ st.set_page_config(page_title="RetroLens", layout="wide")
 st.title("🖐️✨ RetroLens Portal")
 st.write("Buka portal dengan dua tangan. Cubit (pinch) jempol-telunjuk untuk ganti filter.")
 
+# Pake TURN Server biar gak timeout di Streamlit Cloud
 RTC_CONFIGURATION = RTCConfiguration(
-    {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
+    {"iceServers": [
+        {"urls": ["stun:stun.l.google.com:19302"]},
+        {
+            "urls": "turn:openrelay.metered.ca:80",
+            "username": "openrelayproject",
+            "credential": "openrelayproject"
+        }
+    ]}
 )
 
 webrtc_streamer(
@@ -299,4 +307,4 @@ webrtc_streamer(
     video_processor_factory=VideoProcessor,
     media_stream_constraints={"video": True, "audio": False},
     async_processing=True,
-            )
+    )
